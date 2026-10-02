@@ -1,0 +1,18 @@
+repos:
+  - repo: https://github.com/astral-sh/ruff-pre-commit
+    rev: v0.16.9
+    hooks:
+      - id: ruff
+      - id: ruff-format
+  - repo: local
+    hooks:
+      - id: mypy
+        name: mypy --strict
+        entry: .venv/bin/mypy src/sigscope
+        language: system
+        pass_filenames: false
+      - id: bandit
+        name: bandit
+        entry: .venv/bin/bandit -r src/sigscope
+        language: system
+        pass_filenames: false

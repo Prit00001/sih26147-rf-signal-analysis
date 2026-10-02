@@ -1,0 +1,17 @@
+.venv/
+__pycache__/
+*.pyc
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+native/build/
+native/build-asan/
+native/build-tests/
+native/build-tests-asan/
+*.so
+models/
+reports/
+*.egg-info/
+.DS_Store
+.coverage
+.hypothesis/

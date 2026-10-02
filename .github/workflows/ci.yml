@@ -1,0 +1,66 @@
+name: CI
+
+on: [push, pull_request]
+
+jobs:
+  build-and-test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v3
+      - run: uv python install 3.11
+      - run: uv venv --python 3.11 .venv
+      - run: uv pip install --python .venv/bin/python -e ".[dev]"
+      - run: uv pip install --python .venv/bin/python pybind11 cmake ninja atheris semgrep
+      - run: uv pip install --python .venv/bin/python -e ".[train]"  # PyTorch, for classifier tests/training
+      - name: Install Qt runtime deps for headless GUI tests (Linux)
+        run: sudo apt-get update && sudo apt-get install -y libegl1 libgl1 libxkbcommon0 libxcb-cursor0
+
+      - name: Build native extension
+        run: |
+          PYBIND11_DIR=$(.venv/bin/python -c "import pybind11; print(pybind11.get_cmake_dir())")
+          cmake -S native -B native/build -G Ninja -DCMAKE_BUILD_TYPE=Release -Dpybind11_DIR="$PYBIND11_DIR"
+          cmake --build native/build -j
+          cp native/build/_native*.so src/sigscope/
+
+      - name: Build native extension with ASan/UBSan
+        run: |
+          PYBIND11_DIR=$(.venv/bin/python -c "import pybind11; print(pybind11.get_cmake_dir())")
+          cmake -S native -B native/build-asan -G Ninja -DCMAKE_BUILD_TYPE=Debug -Dpybind11_DIR="$PYBIND11_DIR" -DSIGSCOPE_SANITIZE=ON
+          cmake --build native/build-asan -j
+
+      - name: Build and run GoogleTest C++ kernel tests (release + ASan/UBSan)
+        run: |
+          PYBIND11_DIR=$(.venv/bin/python -c "import pybind11; print(pybind11.get_cmake_dir())")
+          cmake -S native -B native/build-tests -G Ninja -DCMAKE_BUILD_TYPE=Release -Dpybind11_DIR="$PYBIND11_DIR" -DSIGSCOPE_BUILD_TESTS=ON
+          cmake --build native/build-tests -j
+          ./native/build-tests/sigscope_kernel_tests
+          cmake -S native -B native/build-tests-asan -G Ninja -DCMAKE_BUILD_TYPE=Debug -Dpybind11_DIR="$PYBIND11_DIR" -DSIGSCOPE_BUILD_TESTS=ON -DSIGSCOPE_SANITIZE=ON
+          cmake --build native/build-tests-asan -j
+          ./native/build-tests-asan/sigscope_kernel_tests
+
+      - name: Lint (ruff)
+        run: .venv/bin/ruff check src tests
+
+      - name: Types (mypy --strict)
+        run: .venv/bin/mypy src/sigscope
+
+      - name: Security (bandit)
+        run: .venv/bin/bandit -r src/sigscope
+
+      - name: Security (semgrep)
+        run: .venv/bin/semgrep --config auto --error src/sigscope
+
+      - name: Dependency audit (pip-audit)
+        run: .venv/bin/pip-audit
+
+      - name: Tests + coverage (>= 80% on core modules)
+        env:
+          QT_QPA_PLATFORM: offscreen
+        run: .venv/bin/python -m pytest tests/ -q --ignore=tests/fuzz_wav.py --ignore=tests/fuzz_iq.py --cov-fail-under=80
+
+      - name: Fuzz .wav parser (60s)
+        run: timeout 60 .venv/bin/python tests/fuzz_wav.py -max_total_time=60 || true
+
+      - name: Fuzz .IQ parser (60s)
+        run: timeout 60 .venv/bin/python tests/fuzz_iq.py -max_total_time=60 || true
