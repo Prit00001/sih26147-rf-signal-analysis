@@ -106,20 +106,31 @@ def write_csv(rows: list[dict[str, object]], path: Path) -> None:
 
 
 def write_plot(rows: list[dict[str, object]], path: Path) -> None:
-    fig, ax = plt.subplots(figsize=(8, 5))
-    for mod in LINEAR_MODS + FSK_MODS:
-        mod_rows = sorted((r for r in rows if r["modulation"] == mod), key=lambda r: r["nominal_snr_db"])  # type: ignore[arg-type]
-        snrs = [r["nominal_snr_db"] for r in mod_rows]
-        sers = [max(r["ser"], 1e-4) for r in mod_rows]  # type: ignore[type-var]
-        ax.semilogy(snrs, sers, marker="o", label=mod)
-    ax.set_xlabel("Generator nominal SNR (dB)")
-    ax.set_ylabel("Symbol error rate (log scale, floor 1e-4)")
-    ax.set_title("Demodulator SER vs SNR (measured)")
-    ax.legend(fontsize=8, ncol=2)
-    ax.grid(alpha=0.3, which="both")
-    fig.tight_layout()
-    fig.savefig(path, dpi=120)
-    plt.close(fig)
+    # Dark theme matching the web dashboard's own chart styling
+    # (webui/server.py's _DARK_RC) -- this PNG is embedded directly in that
+    # dark-themed page's Benchmarks tab.
+    with plt.rc_context(
+        {
+            "figure.facecolor": "#111113", "axes.facecolor": "#111113", "savefig.facecolor": "#111113",
+            "axes.edgecolor": "#2a2a2e", "axes.labelcolor": "#f3f3f5", "axes.titlecolor": "#f3f3f5",
+            "text.color": "#f3f3f5", "xtick.color": "#93939d", "ytick.color": "#93939d",
+            "legend.labelcolor": "#f3f3f5", "grid.color": "#2a2a2e",
+        }
+    ):
+        fig, ax = plt.subplots(figsize=(8, 5))
+        for mod in LINEAR_MODS + FSK_MODS:
+            mod_rows = sorted((r for r in rows if r["modulation"] == mod), key=lambda r: r["nominal_snr_db"])  # type: ignore[arg-type]
+            snrs = [r["nominal_snr_db"] for r in mod_rows]
+            sers = [max(r["ser"], 1e-4) for r in mod_rows]  # type: ignore[type-var]
+            ax.semilogy(snrs, sers, marker="o", label=mod, linewidth=1.5, markersize=4)
+        ax.set_xlabel("Generator nominal SNR (dB)")
+        ax.set_ylabel("Symbol error rate (log scale, floor 1e-4)")
+        ax.set_title("Demodulator SER vs SNR (measured)")
+        ax.legend(fontsize=8, ncol=2, facecolor="#19191c", edgecolor="#2a2a2e")
+        ax.grid(alpha=0.5, which="both")
+        fig.tight_layout()
+        fig.savefig(path, dpi=120)
+        plt.close(fig)
 
 
 if __name__ == "__main__":
