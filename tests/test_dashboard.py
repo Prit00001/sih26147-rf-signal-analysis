@@ -44,8 +44,11 @@ def _build_multipart(fields: dict, files: dict) -> tuple[bytes, str]:
     return b"".join(parts), f"multipart/form-data; boundary={boundary}"
 
 
-def _run_demo(running_server: int, demo_name: str) -> dict:  # type: ignore[type-arg]
-    body, content_type = _build_multipart({"demo": demo_name}, {})
+def _run_demo(running_server: int, demo_name: str, *, modulation: str | None = None) -> dict:  # type: ignore[type-arg]
+    fields = {"demo": demo_name}
+    if modulation:
+        fields["modulation"] = modulation
+    body, content_type = _build_multipart(fields, {})
     conn = HTTPConnection("127.0.0.1", running_server, timeout=20)
     conn.request("POST", "/api/analyze-upload", body=body, headers={"Content-Type": content_type})
     resp = conn.getresponse()
@@ -74,7 +77,10 @@ def test_hero_and_stepper_present_with_real_timings(running_server: int) -> None
 
 
 def test_fec_panel_reports_real_errors_corrected_for_rs_demo(running_server: int) -> None:
-    data = _run_demo(running_server, "qpsk_rs_interleaved")
+    # Explicit override: this test exercises FEC-panel plumbing, not
+    # classifier accuracy -- a fresh checkout has no trained model (models/
+    # is gitignored, a build artifact, not committed).
+    data = _run_demo(running_server, "qpsk_rs_interleaved", modulation="qpsk")
     panel = data["fec_panel"]
     assert panel["label"] == "reed-solomon (n=15, k=9, m=4)"
     assert panel["bit_errors_corrected"] is not None

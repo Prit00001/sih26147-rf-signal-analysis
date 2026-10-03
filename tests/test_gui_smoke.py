@@ -36,7 +36,7 @@ def test_main_window_loads_and_runs_auto_analysis(qtbot, generated_wav: Path) ->
     window._file_path = str(generated_wav)
     window._file_label.setText(str(generated_wav))
     window._mod_override_edit.setText("qpsk")  # force modulation since no trained model is guaranteed present
-    window._on_run_auto()
+    window._on_rerun_with_overrides()  # _on_run_auto() clears the override field -- "auto" means auto
 
     assert window._worker is not None
     with qtbot.waitSignal(window._worker.finished_ok, timeout=15000):

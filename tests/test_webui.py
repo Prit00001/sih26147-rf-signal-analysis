@@ -155,7 +155,12 @@ def test_demo_dropdown_selection_runs_real_analysis(running_server: int) -> None
     from sigscope.webui.server import _get_demos
 
     demo_name = next(iter(_get_demos()))
-    body, content_type = _build_multipart({"demo": demo_name}, {})
+    # Explicit modulation override: this test exercises the upload/demo
+    # plumbing, not classifier accuracy (see test_classify.py's own
+    # docstring on that split) -- a fresh checkout has no trained model
+    # (models/ is gitignored, a build artifact, not committed), which would
+    # otherwise leave modulation unclassified and nothing to demodulate.
+    body, content_type = _build_multipart({"demo": demo_name, "modulation": "qpsk"}, {})
     conn = HTTPConnection("127.0.0.1", running_server, timeout=20)
     conn.request("POST", "/api/analyze-upload", body=body, headers={"Content-Type": content_type})
     resp = conn.getresponse()
