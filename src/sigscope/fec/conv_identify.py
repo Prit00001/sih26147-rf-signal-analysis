@@ -189,3 +189,24 @@ def identify_convolutional_code(
     if best_confidence < min_confidence:
         return ConvIdentifyResult(None, 0, max(best_confidence, 0.0), max(best_raw, 0.0), all_scores)
     return ConvIdentifyResult(best_name, best_phase, best_confidence, best_raw, all_scores)
+
+
+def decode_with_code(
+    bits: npt.NDArray[np.int64], name: str, phase: int, *, library: tuple[ConvCodeSpec, ...] = CONV_CODE_LIBRARY
+) -> npt.NDArray[np.int64]:
+    """Viterbi-decodes ``bits`` with an already-identified candidate
+    (``name``/``phase`` from an ``identify_convolutional_code`` result),
+    recovering the message bits that sit BEHIND this code. Used by
+    pipeline_core to search one level deeper -- a convolutional code is
+    normally the innermost transform before modulation, so whatever outer
+    interleaver/block code was applied before it only becomes visible once
+    this code is undone.
+    """
+    spec = next(s for s in library if s.name == name)
+    shifted = bits[phase:]
+    period = spec.alignment_period
+    usable_len = (len(shifted) // period) * period
+    shifted = shifted[:usable_len]
+    llrs = _depuncture_to_llr(shifted, spec)
+    decoded = _native.viterbi_decode(llrs.tolist(), spec.constraint_length, list(spec.generators))
+    return np.array(decoded, dtype=np.int64)

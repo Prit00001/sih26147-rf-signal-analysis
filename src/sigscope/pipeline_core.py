@@ -19,10 +19,10 @@ import numpy as np
 import numpy.typing as npt
 
 from sigscope.core.signal import Signal
-from sigscope.correlate.bitstream import find_frame_length, segment_header_payload
+from sigscope.correlate.bitstream import find_frame_length, find_sync_word, segment_header_payload
 from sigscope.demod.pipeline import DemodParams, DemodStage
 from sigscope.estimate.blind import estimate_rolloff, estimate_snr_m2m4, estimate_symbol_rate_hz
-from sigscope.fec.conv_identify import identify_convolutional_code
+from sigscope.fec.conv_identify import decode_with_code, identify_convolutional_code
 from sigscope.fec.identify import identify_block_period, identify_rs
 from sigscope.fec.interleave import block_deinterleave
 from sigscope.fec.reed_solomon import RSCode, UncorrectableError
@@ -31,11 +31,20 @@ from sigscope.io.wav_reader import read_wav
 from sigscope.preprocess.dc_iq import remove_dc
 from sigscope.spectral.analysis import waterfall as compute_waterfall
 from sigscope.spectral.analysis import welch_psd
+from sigscope.synth.generator import LINEAR_BITS_PER_SYMBOL, constellation_for
 
 # Bounded so blind FEC/interleaver identification stays fast enough for an
 # interactive GUI request; a real analyst re-running with more data via the
 # CLI is not bound by this.
-_IDENTIFY_MAX_BITS = 6000
+# MEASURED: raised from 6000 while adding the nested (decode-behind-a-found-
+# conv-code) interleaver search -- a candidate block interleaver can only be
+# correctly inverted from a COMPLETE copy of its (rows x cols) matrix, not a
+# truncated prefix (confirmed: truncating mid-block made period detection
+# pick a spurious period, not just a less-confident correct one). This
+# project's own full-chain demo needs the conv-decoded stream to cover its
+# whole interleaved block (3600 bits here), which after rate-1/2 conv coding
+# and CCSDS framing overhead needs ~7200 raw bits of header-stripped budget.
+_IDENTIFY_MAX_BITS = 8192
 _RS_CANDIDATE_M = (3, 4, 5)
 _RS_CANDIDATE_NS = (7, 15, 31)
 _INTERLEAVER_CANDIDATE_PERIODS = list(range(2, 65))
@@ -58,6 +67,102 @@ def _calibrate_confidence(raw: float, kind: str) -> float:
     return float(1 / (1 + np.exp(-(a * z + b))))
 
 
+# Decision-directed carrier recovery (demod/sync.py) locks onto any of the
+# constellation's rotational symmetries with equal validity -- this is the
+# fold of the actual symmetry GROUP, not the point count: an M-PSK ring has
+# M-fold symmetry, but a square 16/64-QAM lattice only has 4-fold (90 deg)
+# symmetry despite having 16/64 points. Resolving which one blindly (no
+# ground truth) is the only question; see _resolve_carrier_rotation below.
+_ROTATION_FOLD = {"bpsk": 2, "qpsk": 4, "8psk": 8, "16qam": 4, "64qam": 4}
+
+# The one sync word this project assumes absent an analyst-supplied pattern:
+# the CCSDS TM Attached Sync Marker, used by the project's own full-chain
+# demo (see README P3/P4). A real deployment would let the analyst supply
+# whatever sync word the actual protocol uses instead.
+_CCSDS_SYNC_WORD = np.array([int(b) for b in f"{0x1ACFFC1D:032b}"], dtype=np.int64)
+
+
+def _bits_table(bps: int) -> npt.NDArray[np.int64]:
+    indices = np.arange(2**bps)
+    bit_positions = np.arange(bps - 1, -1, -1)
+    return ((indices[:, None] >> bit_positions[None, :]) & 1).astype(np.int64)
+
+
+def _resolve_carrier_rotation(
+    symbols: npt.NDArray[np.complex64], modulation: str, max_identify_bits: int
+) -> tuple[npt.NDArray[np.int64], npt.NDArray[np.complex64], int, str]:
+    """Blindly resolves the constellation rotational ambiguity left by
+    decision-directed carrier recovery (see demod/sync.py's docstring) --
+    NEVER reads ground truth. Tries every rotation in the constellation's
+    actual symmetry group and scores each by (a) whether the assumed CCSDS
+    sync word correlates (a real hit recurs periodically -- see
+    find_sync_word's docstring), else (b) which rotation's bits best fit a
+    library FEC code (highest Viterbi re-encode agreement / most zero RS
+    syndromes, i.e. fewest implied corrections). Returns (hard_bits,
+    corrected_symbols, rotation_index, human-readable reason).
+
+    Known, documented scope limit (same honesty discipline as the rest of
+    this project): the FEC fallback only checks the RAW stream, not every
+    rotation's de-interleaved candidate (checking all fold x period
+    combinations was judged not worth the added latency for an interactive
+    GUI request) -- an interleaved-RS-only signal with no sync word and an
+    actual rotation offset can come back "unresolved". Add deinterleaved
+    scoring here too if that combination turns out to matter in practice.
+    """
+    bps = LINEAR_BITS_PER_SYMBOL[modulation]
+    fold = _ROTATION_FOLD[modulation]
+    const = constellation_for(modulation)
+    bits_table = _bits_table(bps)
+    degrees_per_step = 360 // fold
+
+    candidates: list[tuple[npt.NDArray[np.complex64], npt.NDArray[np.int64]]] = []
+    for rot in range(fold):
+        derot = (symbols.astype(np.complex128) * np.exp(-1j * rot * 2 * np.pi / fold)).astype(np.complex64)
+        decisions = np.argmin(np.abs(derot[:, None] - const[None, :]), axis=1)
+        hard_bits = bits_table[decisions].reshape(-1)
+        candidates.append((derot, hard_bits))
+
+    best_sync: tuple[int, float] | None = None
+    for rot, (_derot, hard_bits) in enumerate(candidates):
+        res = find_sync_word(hard_bits[:max_identify_bits], _CCSDS_SYNC_WORD)
+        if res.positions and res.confidence > 0 and (best_sync is None or res.confidence > best_sync[1]):
+            best_sync = (rot, res.confidence)
+    if best_sync is not None:
+        rot, conf = best_sync
+        derot, hard_bits = candidates[rot]
+        reason = f"sync word (CCSDS 1ACFFC1D) matched at {rot * degrees_per_step} deg (periodicity {conf:.2f})"
+        return hard_bits, derot, rot, reason
+
+    best_fec: tuple[int, float, str] | None = None
+    for rot, (_derot, hard_bits) in enumerate(candidates):
+        probe = hard_bits[:max_identify_bits]
+        conv_guess = identify_convolutional_code(probe)
+        if conv_guess.name is not None and (best_fec is None or conv_guess.confidence > best_fec[1]):
+            best_fec = (
+                rot,
+                conv_guess.confidence,
+                f"convolutional ({conv_guess.name}) fit best at {rot * degrees_per_step} deg "
+                f"(re-encode agreement {conv_guess.raw_agreement:.3f})",
+            )
+        for m in _RS_CANDIDATE_M:
+            candidate_ks = list(range(1, min((1 << m) - 1, 32)))
+            rs_guess = identify_rs(probe, m=m, candidate_ns=list(_RS_CANDIDATE_NS), candidate_ks=candidate_ks)
+            if rs_guess.confidence > 0 and (best_fec is None or rs_guess.confidence > best_fec[1]):
+                best_fec = (
+                    rot,
+                    rs_guess.confidence,
+                    f"reed-solomon (n={rs_guess.params.get('n')}, k={rs_guess.params.get('k')}) fit best at "
+                    f"{rot * degrees_per_step} deg",
+                )
+    if best_fec is not None and best_fec[1] >= 0.3:
+        rot = best_fec[0]
+        derot, hard_bits = candidates[rot]
+        return hard_bits, derot, rot, best_fec[2]
+
+    derot, hard_bits = candidates[0]
+    return hard_bits, derot, 0, "no sync word or FEC evidence found; rotation unresolved (defaulted to 0 deg)"
+
+
 @dataclass
 class PipelineResult:
     signal: Signal | None = None
@@ -78,8 +183,11 @@ class PipelineResult:
     demod_symbols: npt.NDArray[np.complex64] | None = None
     demod_symbols_before_carrier_recovery: npt.NDArray[np.complex64] | None = None
     hard_bits: npt.NDArray[np.int64] | None = None
+    carrier_rotation_degrees: int = 0
+    carrier_rotation_reason: str | None = None
     frame_length: int = 0
     frame_length_confidence: float = 0.0
+    frame_phase: int = 0
     header_length: int = 0
     header_confidence: float = 0.0
     sync_word_bits: list[int] = field(default_factory=list)
@@ -219,6 +327,23 @@ def run_full_pipeline(
             result.demod_symbols_before_carrier_recovery = getattr(demod_result, "pre_carrier_symbols", None)
         stage("demodulate", 1.0 if len(demod_result.hard_bits) else 0.0)
 
+        if modulation in LINEAR_BITS_PER_SYMBOL and result.demod_symbols is not None and len(result.demod_symbols) > 50:
+            log("Resolving carrier-recovery rotation ambiguity ...")
+            with timed("resolve_rotation"):
+                hard_bits, corrected, rot, reason = _resolve_carrier_rotation(
+                    result.demod_symbols, modulation, _IDENTIFY_MAX_BITS
+                )
+                result.hard_bits = hard_bits
+                result.demod_symbols = corrected
+                result.carrier_rotation_degrees = rot * (360 // _ROTATION_FOLD[modulation])
+                result.carrier_rotation_reason = reason
+                if "unresolved" in reason:
+                    result.stage_status["resolve_rotation"] = "fallback to override"
+            stage("resolve_rotation", 0.0 if "unresolved" in reason else 1.0)
+        elif modulation in LINEAR_BITS_PER_SYMBOL:
+            result.stage_status["resolve_rotation"] = "not present"
+            result.stage_timings_ms["resolve_rotation"] = 0.0
+
         if result.hard_bits is not None and len(result.hard_bits) > 100:
             log("Searching for frame structure ...")
             with timed("correlate"):
@@ -237,15 +362,19 @@ def run_full_pipeline(
                     # (one period's worth of reshapes), so just try them all
                     # and keep the best-scoring alignment.
                     best_seg = segment_header_payload(result.hard_bits, fl.period)
+                    best_phase = 0
                     for phase in range(1, fl.period):
                         candidate = segment_header_payload(result.hard_bits[phase:], fl.period)
                         if candidate.confidence > best_seg.confidence:
-                            best_seg = candidate
+                            best_seg, best_phase = candidate, phase
                     seg = best_seg
                     result.header_length = seg.header_length
                     result.header_confidence = seg.confidence
+                    result.frame_phase = best_phase
                     if seg.header_length > 0:
-                        result.sync_word_bits = [int(b) for b in result.hard_bits[: seg.header_length]]
+                        result.sync_word_bits = [
+                            int(b) for b in result.hard_bits[best_phase : best_phase + seg.header_length]
+                        ]
                     # A stepper stage must not show "done" (green) just
                     # because it ran without crashing -- it must have
                     # actually found framing with enough confidence to be
@@ -261,7 +390,49 @@ def run_full_pipeline(
             result.stage_timings_ms["correlate"] = 0.0
 
         if result.hard_bits is not None and len(result.hard_bits) > 200:
-            identify_bits = result.hard_bits[:_IDENTIFY_MAX_BITS]
+            # When framing was confidently found, strip the per-frame header
+            # (sync word) out before identification: a sync word interspersed
+            # directly in an otherwise continuously-encoded stream is foreign
+            # data to any FEC decoder fed the raw stream whole, corrupting a
+            # window around every frame boundary (trellis re-sync delay for
+            # a convolutional code, broken GF2-rank structure for a block
+            # interleaver). MEASURED: on this project's own CCSDS-framed full
+            # chain demo, this was the actual reason an inner conv code's
+            # decoded payload didn't reveal the interleaver/RS hidden behind
+            # it even once Viterbi-decoded -- stripping headers first (using
+            # the SAME frame_length/header_length/phase correlate just found,
+            # not a second guess) fixed it.
+            # Gate on header_length, not frame_length_confidence: that
+            # confidence metric is legitimately noisy for a CORRECT detection
+            # (see find_frame_length's own docstring on the harmonic-ambiguity
+            # fix) -- measured on this project's own full-chain demo at 0.11
+            # despite frame_length/header_length both being exactly right, so
+            # a confidence floor high enough to reject noise would ALSO
+            # reject that real case. header_length is the more honest signal:
+            # MEASURED on an uncoded, unframed test signal, segment_header_
+            # payload's entropy search still reports SOME period/header from
+            # pure correlate noise (frame_length=351 conf=0.04, header_length
+            # =1) -- stripping on that misreads real data as a header and
+            # destroys the actual interleaver/FEC structure (a real
+            # regression this caught). A 1-bit "header" is not a usable sync
+            # word for any real protocol (see find_sync_word's own docstring
+            # on short-pattern false-alarm rate); requiring a few bits of
+            # header is a floor on "is this plausibly a sync word", which a
+            # chance correlate peak essentially never clears.
+            if result.frame_length > 0 and result.header_length >= 8:
+                period, hlen, ph = result.frame_length, result.header_length, result.frame_phase
+                payload_bits = result.hard_bits[ph:]
+                n_frames = len(payload_bits) // period
+                payload_only = np.concatenate(
+                    [payload_bits[i * period + hlen : (i + 1) * period] for i in range(n_frames)]
+                )
+                identify_bits = (
+                    payload_only[:_IDENTIFY_MAX_BITS]
+                    if len(payload_only) > 0
+                    else result.hard_bits[:_IDENTIFY_MAX_BITS]
+                )
+            else:
+                identify_bits = result.hard_bits[:_IDENTIFY_MAX_BITS]
 
             log("Identifying interleaver ...")
             with timed("interleaver"):
@@ -309,6 +480,51 @@ def run_full_pipeline(
                 best_label, best_conf, best_params = _best_fec_match(identify_bits, include_convolutional=True)
                 best_stream = identify_bits
 
+                # One additional recursion level: a convolutional code is
+                # normally the INNERMOST transform before modulation
+                # (closest to the channel), so a confident match on the raw
+                # stream says nothing about an outer interleaver/block code
+                # that might sit BEHIND it -- but it doesn't have to stay
+                # invisible. Viterbi-decoding the identified code recovers
+                # exactly the bits that were encoded, and THOSE can be
+                # searched the same way the top-level stream already is.
+                # Bounded to exactly one extra level (not unbounded
+                # recursion) -- deep enough for this project's library
+                # (outer block code -> interleave -> inner conv, the
+                # standard concatenated-coding arrangement) without
+                # open-ended cost for an interactive GUI request.
+                nested_il_guess = None
+                if best_label is not None and best_label.startswith("convolutional") and best_conf >= 0.5:
+                    decoded_behind_conv = decode_with_code(
+                        identify_bits,
+                        str(best_params["code"]),
+                        int(best_params["phase"]),  # type: ignore[call-overload]
+                    )
+                    nested_il_guess = identify_block_period(decoded_behind_conv, _INTERLEAVER_CANDIDATE_PERIODS)
+                    if nested_il_guess.confidence >= 0.15:
+                        nested_period = int(nested_il_guess.params["period"])
+                        nested_rows = len(decoded_behind_conv) // nested_period
+                        if nested_rows >= 2:
+                            nested_deint = block_deinterleave(
+                                decoded_behind_conv[: nested_rows * nested_period], nested_rows, nested_period
+                            )
+                            nested_label, nested_conf, _nested_params = _best_fec_match(
+                                nested_deint, include_convolutional=False
+                            )
+                            if nested_conf >= 0.3:
+                                # Display-only: the correction-count/decode
+                                # path below still keys off the ORIGINAL
+                                # (inner, conv) best_label/best_params --
+                                # this only extends what is REPORTED, not
+                                # which stream gets decoded for error counts.
+                                best_label = f"{best_label} + {nested_label}"
+                            else:
+                                nested_il_guess = None  # a period with no matching code behind it is not evidence
+                        else:
+                            nested_il_guess = None
+                    else:
+                        nested_il_guess = None
+
                 if il_guess.confidence >= 0.15:
                     period = int(il_guess.params["period"])
                     rows = len(identify_bits) // period
@@ -351,7 +567,10 @@ def run_full_pipeline(
                 result.fec_confidence = best_conf
                 result.fec_params = best_params
 
-            if il_guess.confidence >= 0.15:
+            effective_il_guess = nested_il_guess if nested_il_guess is not None else il_guess
+            if nested_il_guess is not None:
+                result.interleaver_label = f"block (period={nested_il_guess.params['period']})"
+            elif il_guess.confidence >= 0.15:
                 result.interleaver_label = f"block (period={il_guess.params['period']})"
             elif best_conf >= 0.3 and best_label is not None and best_label.startswith("reed-solomon"):
                 # A directly-verified RS codeword on the raw stream proves no
@@ -372,7 +591,7 @@ def run_full_pipeline(
             else:
                 result.interleaver_label = "unidentified"
                 result.stage_status["interleaver"] = "fallback to override"
-            stage("interleaver", il_guess.confidence)
+            stage("interleaver", effective_il_guess.confidence)
             stage("identify_fec", best_conf)
 
             # Calibration (scripts/calibrate_identification_confidence.py,
@@ -395,7 +614,7 @@ def run_full_pipeline(
             # no noisy/partial-failure RS trials, so this one result is
             # weaker evidence than the other two).
             if result.interleaver_label is not None and result.interleaver_label.startswith("block (period="):
-                result.interleaver_confidence = _calibrate_confidence(il_guess.confidence, "interleaver")
+                result.interleaver_confidence = _calibrate_confidence(effective_il_guess.confidence, "interleaver")
             is_rs = best_label is not None and best_label.startswith("reed-solomon")
             fec_kind = "reed-solomon" if is_rs else "convolutional"
             if result.fec_label not in (None, "unidentified"):

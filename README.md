@@ -30,7 +30,7 @@ scripts/build_native.sh   # builds sigscope._native (pybind11/C++), requires a C
 .venv/bin/python -m pytest tests/ -q --ignore=tests/fuzz_wav.py --ignore=tests/fuzz_iq.py
 .venv/bin/ruff check src tests
 .venv/bin/mypy src/sigscope
-.venv/bin/bandit -r src/sigscope
+.venv/bin/bandit -c pyproject.toml -r src/sigscope
 .venv/bin/semgrep --config auto src/sigscope
 .venv/bin/pip-audit
 ```
@@ -158,10 +158,21 @@ interleaver identifier's original rank-based scoring was mathematically
 incapable of ever working, since GF(2) rank is invariant under coordinate
 permutation -- replaced with a code-specific syndrome checker.
 
-**Known, documented scope limits:** the RS decoder searches error-location
+**Upgraded since (P5):** the RS decoder originally searched error-location
 subsets combinatorially (correct and simple, but exponential in the number of
-correctable errors -- fine at this project's test code lengths, not
-production-scale); FEC/interleaver identification is confidence-scored and
+correctable errors -- fine at small test code lengths, not production-scale).
+Replaced with the standard Berlekamp-Massey + Chien search + Forney pipeline
+(all O(n*t) or better); the combinatorial version is kept only as
+`RSCode._decode_combinatorial`, for cross-validating the replacement in
+tests, not for live use. **Measured**
+(`scripts/benchmark_rs_decode.py` / `reports/rs_decode_time_before_after.csv`,
+full correction radius t errors per trial): RS(15,9) t=3 decode time
+6.24 ms -> 0.11 ms (~57x); RS(31,21) t=5 5881 ms -> 0.34 ms (~17,000x);
+RS(255,223) t=16 (CCSDS-standard length, now supported) was not feasible to
+even run on the old decoder (C(255,16) candidate subsets) -> 6.42 ms mean,
+6.71 ms worst case on the new one.
+
+**Known, documented scope limits:** FEC/interleaver identification is confidence-scored and
 reports "unidentified" rather than a false positive when nothing in the
 library matches, consistent with Phase 1's documented position that some
 blind identification (arbitrary LDPC H, unlisted PRNG generators) is not

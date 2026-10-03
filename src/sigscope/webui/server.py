@@ -52,13 +52,13 @@ ALLOWED_UPLOAD_EXTENSIONS = (".wav", ".iq")
 # every panel is still populated by an actual run of the pipeline over them.
 # --------------------------------------------------------------------------
 
-_DEMO_CACHE: dict[str, dict[str, str]] | None = None
+_DEMO_CACHE: dict[str, dict[str, Any]] | None = None
 
 
 def _build_demo_files() -> dict[str, dict[str, str]]:
     demo_dir = Path(tempfile.gettempdir()) / "sigscope_demo_samples"
     demo_dir.mkdir(exist_ok=True)
-    demos: dict[str, dict[str, str]] = {}
+    demos: dict[str, dict[str, Any]] = {}
 
     def _add(
         name: str,
@@ -163,12 +163,19 @@ def _build_demo_files() -> dict[str, dict[str, str]]:
     # concatenated-coding order (outer block code, then interleave, THEN the
     # inner convolutional code -- interleaving right before modulation would
     # destroy the conv code's trellis structure, a mistake this project
-    # already found and fixed once before). KNOWN LIMITATION, found by
-    # building this demo: the interleaver sits BEHIND the conv code from the
-    # receiver's point of view, and the GF2-rank interleaver detector cannot
-    # see through a convolutional transform to find it -- it will honestly
-    # report "unidentified" here, not the true "block (period=60)". See
-    # README for the measured ground-truth score and why.
+    # already found and fixed once before).
+    #
+    # FIXED (previously a known limitation): the interleaver sits BEHIND the
+    # conv code from the receiver's point of view, and the GF2-rank
+    # interleaver detector cannot see through a convolutional transform
+    # directly -- but pipeline_core now Viterbi-decodes a confidently
+    # identified conv code and re-runs the SAME interleaver+FEC search one
+    # level deeper on the decoded payload, after first stripping the
+    # per-frame sync word (periodic foreign bits in an otherwise
+    # continuously-encoded stream were corrupting the decode at every frame
+    # boundary -- MEASURED, not assumed). Result: every ground-truth row for
+    # this demo now matches, including the previously-"unidentified"
+    # interleaver and outer RS code.
     rng3 = np.random.default_rng(106)
     rs3 = RSCode(m=4, n=15, k=9)
     rs3_symbols = np.concatenate([rs3.encode(rng3.integers(0, 16, rs3.k)) for _ in range(60)])
@@ -199,7 +206,7 @@ def _build_demo_files() -> dict[str, dict[str, str]]:
         sig,
         gt,
         expected_interleaver="block (period=60)",
-        expected_fec="convolutional (rate1/2_K7)",
+        expected_fec="convolutional (rate1/2_K7) + reed-solomon (n=15, k=9, m=4)",
         expected_frame_length=fc_frame_payload + len(ccsds_sync),
         expected_header_length=len(ccsds_sync),
     )
@@ -207,7 +214,7 @@ def _build_demo_files() -> dict[str, dict[str, str]]:
     return demos
 
 
-def _get_demos() -> dict[str, dict[str, str]]:
+def _get_demos() -> dict[str, dict[str, Any]]:
     global _DEMO_CACHE
     if _DEMO_CACHE is None:
         _DEMO_CACHE = _build_demo_files()
@@ -346,6 +353,7 @@ _STEPPER_STAGES: tuple[tuple[str, str], ...] = (
     ("Estimate", "estimate"),
     ("Classify", "classify"),
     ("Demod", "demodulate"),
+    ("Resolve rotation", "resolve_rotation"),
     ("De-interleave", "interleaver"),
     ("FEC", "identify_fec"),
     ("Correlate", "correlate"),
@@ -506,8 +514,20 @@ def _ground_truth_comparison(result: PipelineResult, demo_name: str | None) -> l
             "detected": result.fec_label or "-",
             "match": result.fec_label == info["expected_fec"],
         },
+        # Gated on header_confidence, not frame_length_confidence: a frame is
+        # only meaningfully "present" once its header actually segments out
+        # (a real low-entropy prefix), and that signal is cleanly binary in
+        # practice -- MEASURED across every demo: header_confidence is
+        # exactly 0 whenever there is no real framing, while raw
+        # frame_length_confidence is noisy regardless of correctness (0.02-
+        # 0.49 even on unframed demos, including a false "detected" on the
+        # 2FSK demo's single-bit autocorrelation artifact) and, on this
+        # project's own real CCSDS full-chain demo, scores a genuine,
+        # correct detection as low as 0.11 -- too low by the same 0.3
+        # not-detected bar used elsewhere, which would misreport a correct
+        # value as "not detected".
         _absent_or_value_row(
-            "frame_length", info.get("expected_frame_length"), result.frame_length, result.frame_length_confidence
+            "frame_length", info.get("expected_frame_length"), result.frame_length, result.header_confidence
         ),
         _absent_or_value_row(
             "header_length", info.get("expected_header_length"), result.header_length, result.header_confidence
@@ -592,6 +612,12 @@ def _result_to_json(
         _row("symbol_rate", f"{result.symbol_rate_hz:.1f} Hz", result.symbol_rate_confidence, rate_source),
         _row("snr", f"{result.snr_db:.1f} dB", result.snr_confidence, _SOURCE_ESTIMATED),
         _row("rolloff", f"{result.rolloff:.3f}", result.rolloff_confidence, _SOURCE_ESTIMATED),
+        _row(
+            "carrier_rotation",
+            f"{result.carrier_rotation_degrees} deg -- {result.carrier_rotation_reason or '-'}",
+            0.0 if (result.carrier_rotation_reason and "unresolved" in result.carrier_rotation_reason) else 1.0,
+            _SOURCE_ESTIMATED,
+        ),
         _row("interleaver", result.interleaver_label or "-", result.interleaver_confidence, il_source),
         _row("fec", result.fec_label or "-", result.fec_confidence, fec_source),
         _row("frame_length", str(result.frame_length), result.frame_length_confidence, _SOURCE_ESTIMATED),
@@ -992,13 +1018,19 @@ fetch('/api/build-info').then((r) => r.json()).then((info) => {{
     footer.innerHTML = '<span class="chip">build info not generated -- run scripts/write_build_info.py</span>';
     return;
   }}
+  const statusColor = (status) => status === 'clean' ? 'var(--good)' : (status === 'not run' ? 'var(--text-faint)' : 'var(--bad)');
   const asan = info.asan_ubsan || {{}};
-  const asanColor = asan.status === 'clean' ? 'var(--good)' : (asan.status === 'not run' ? 'var(--text-faint)' : 'var(--bad)');
+  const clangTidy = info.clang_tidy || {{}};
+  const cppcheck = info.cppcheck || {{}};
+  const atheris = info.atheris_fuzz || {{}};
   const chips = [
     [`${{info.tests_passed}}/${{info.tests_passed + info.tests_failed}} tests passing`, info.tests_failed === 0 ? 'var(--good)' : 'var(--bad)'],
     [`${{info.coverage_percent}}% coverage`, 'var(--good)'],
     [info.native_cpp_kernels_present ? 'C++ kernels present' : 'C++ kernels missing', info.native_cpp_kernels_present ? 'var(--good)' : 'var(--bad)'],
-    [`ASan/UBSan: ${{asan.status}}`, asanColor],
+    [`ASan/UBSan: ${{asan.status}}`, statusColor(asan.status)],
+    [`clang-tidy: ${{clangTidy.status}}`, statusColor(clangTidy.status)],
+    [`cppcheck: ${{cppcheck.status}}`, statusColor(cppcheck.status)],
+    [`atheris fuzz: ${{atheris.status}}`, statusColor(atheris.status)],
   ];
   footer.innerHTML = chips.map(([text, color]) => `<span class="chip"><span class="dot" style="background:${{color}}"></span>${{text}}</span>`).join('');
 }}).catch(() => {{}});

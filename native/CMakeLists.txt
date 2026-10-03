@@ -4,6 +4,7 @@ project(sigscope_native LANGUAGES CXX)
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_POSITION_INDEPENDENT_CODE ON)
+set(CMAKE_EXPORT_COMPILE_COMMANDS ON)  # lets clang-tidy (CI) use this build's real compile flags
 
 find_package(pybind11 CONFIG REQUIRED)
 

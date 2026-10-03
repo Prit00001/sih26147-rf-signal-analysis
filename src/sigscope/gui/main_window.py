@@ -12,6 +12,7 @@ from pathlib import Path
 import numpy as np
 import pyqtgraph as pg
 from PySide6.QtCore import Qt
+from PySide6.QtGui import QColor
 from PySide6.QtWidgets import (
     QFileDialog,
     QHeaderView,
@@ -35,7 +36,18 @@ from sigscope.gui.pipeline_worker import PipelineResult, PipelineWorker
 from sigscope.gui.theme import DARK_QSS
 
 _DEFAULT_MODEL_MANIFEST = Path(__file__).resolve().parents[3] / "models" / "modulation_cnn.manifest.json"
-STAGE_NAMES = ["ingest", "spectrum", "classify", "estimate", "demodulate", "correlate"]
+STAGE_NAMES = ["ingest", "spectrum", "classify", "estimate", "demodulate", "resolve_rotation", "correlate"]
+
+# Same palette and meaning as the web GUI's stepper (webui/server.py):
+# green=done (found with confidence above threshold), amber=not present/low
+# confidence (fallback, absent), accent=analyst override, red=error.
+_STAGE_STATUS_COLOR = {
+    "done": QColor("#2fc383"),
+    "override": QColor("#6e6af5"),
+    "fallback to override": QColor("#e3b341"),
+    "not present": QColor("#e3b341"),
+    "error": QColor("#f2574c"),
+}
 
 
 class MainWindow(QMainWindow):
@@ -192,6 +204,20 @@ class MainWindow(QMainWindow):
             mark = "v" if confidence >= 0.5 else "~"
             self._stage_list.item(idx).setText(f"{mark}  {name}  ({confidence:.2f})")
 
+    def _update_stage_statuses(self, result: PipelineResult) -> None:
+        """Final pass once the run is fully done: recolors every stage by its
+        REAL status (result.stage_status), not just the live confidence-only
+        v/~ marker _on_stage_completed could show mid-run -- a stage that
+        legitimately did not run (e.g. "not present": too few bits, FSK
+        skipping rotation resolution) must read as amber, not look identical
+        to a low-confidence "done"."""
+        for i, name in enumerate(STAGE_NAMES):
+            status = result.stage_status.get(name, "done")
+            color = _STAGE_STATUS_COLOR.get(status, _STAGE_STATUS_COLOR["not present"])
+            item = self._stage_list.item(i)
+            item.setText(f"{name}  -- {status}")
+            item.setForeground(color)
+
     def _append_log(self, message: str) -> None:
         self._log_view.appendPlainText(message)
 
@@ -202,6 +228,7 @@ class MainWindow(QMainWindow):
     def _on_finished(self, result: PipelineResult) -> None:
         self._last_result = result
         self._run_btn.setEnabled(True)
+        self._update_stage_statuses(result)
         self._update_spectrum(result)
         self._update_waterfall(result)
         self._update_constellation(result)
@@ -250,6 +277,12 @@ class MainWindow(QMainWindow):
             ("symbol_rate", f"{result.symbol_rate_hz:.1f} Hz", result.symbol_rate_confidence, "estimated"),
             ("snr", f"{result.snr_db:.1f} dB", result.snr_confidence, "estimated"),
             ("rolloff", f"{result.rolloff:.3f}", result.rolloff_confidence, "estimated"),
+            (
+                "carrier_rotation",
+                f"{result.carrier_rotation_degrees} deg -- {result.carrier_rotation_reason or '-'}",
+                0.0 if (result.carrier_rotation_reason and "unresolved" in result.carrier_rotation_reason) else 1.0,
+                "estimated",
+            ),
             ("frame_length", str(result.frame_length), result.frame_length_confidence, "estimated"),
             ("header_length", str(result.header_length), result.header_confidence, "estimated"),
         ]

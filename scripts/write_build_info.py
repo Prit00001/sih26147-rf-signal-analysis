@@ -1,7 +1,15 @@
 """Writes reports/build_info.json from REAL measurements of this build --
-tests passing, coverage %, whether the native C++ extension is present, and
-whether the ASan/UBSan kernel test binary runs clean -- so the web dashboard's
-"under the hood" badges are never typed-in numbers.
+tests passing, coverage %, whether the native C++ extension is present,
+whether the ASan/UBSan kernel test binary runs clean, clang-tidy/cppcheck
+static-analysis results, and a 60s atheris fuzz run -- so the web
+dashboard's "under the hood" badges are never typed-in numbers.
+
+Every one of these tools that is not installed/runnable in THIS environment
+(e.g. clang-tidy/cppcheck are not installed on macOS here, atheris cannot
+build against Apple Clang -- see README's "Known local-environment gaps")
+reports "not run" with the real reason, never a guessed or hidden result.
+They all run for real on Linux CI (.github/workflows/ci.yml), which is where
+this script is actually invoked end-to-end.
 
 Run: .venv/bin/python scripts/write_build_info.py
 """
@@ -10,6 +18,7 @@ from __future__ import annotations
 
 import json
 import re
+import shutil
 import subprocess
 import sys
 from pathlib import Path
@@ -17,6 +26,8 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 OUT_PATH = ROOT / "reports" / "build_info.json"
 ASAN_BINARY = ROOT / "native" / "build-tests-asan" / "sigscope_kernel_tests"
+COMPILE_DB = ROOT / "native" / "build"
+NATIVE_SRC = sorted((ROOT / "native" / "src").glob("*.cpp"))
 
 
 def _run_tests() -> dict[str, object]:
@@ -66,6 +77,67 @@ def _asan_ubsan_status() -> dict[str, object]:
     return {"status": "clean" if clean else "FAILURES DETECTED", "exit_code": proc.returncode}
 
 
+def _clang_tidy_status() -> dict[str, object]:
+    binary = shutil.which("clang-tidy")
+    if binary is None:
+        return {"status": "not run", "reason": "clang-tidy not installed (runs in CI on Linux; brew install llvm for local macOS)"}
+    if not (COMPILE_DB / "compile_commands.json").is_file():
+        return {"status": "not run", "reason": "no compile_commands.json -- build native/build first (CMAKE_EXPORT_COMPILE_COMMANDS=ON)"}
+    try:
+        proc = subprocess.run(
+            [binary, "-p", str(COMPILE_DB), *[str(f) for f in NATIVE_SRC]],  # noqa: S603
+            capture_output=True, text=True, timeout=300,
+        )
+    except OSError as exc:
+        return {"status": "not run", "reason": f"could not execute clang-tidy: {exc}"}
+    out = proc.stdout + proc.stderr
+    warnings = len(re.findall(r": warning:", out))
+    errors = len(re.findall(r": error:", out))
+    status = "clean" if (warnings == 0 and errors == 0) else "ISSUES DETECTED"
+    return {"status": status, "warnings": warnings, "errors": errors}
+
+
+def _cppcheck_status() -> dict[str, object]:
+    binary = shutil.which("cppcheck")
+    if binary is None:
+        return {"status": "not run", "reason": "cppcheck not installed (runs in CI on Linux; brew install cppcheck for local macOS)"}
+    try:
+        proc = subprocess.run(
+            [binary, "--enable=warning,style", "--inline-suppr", "--quiet", str(ROOT / "native" / "src")],  # noqa: S603
+            capture_output=True, text=True, timeout=300,
+        )
+    except OSError as exc:
+        return {"status": "not run", "reason": f"could not execute cppcheck: {exc}"}
+    out = proc.stdout + proc.stderr
+    issues = len(re.findall(r"^\S+:\d+:\d+: (warning|style|error):", out, re.MULTILINE))
+    return {"status": "clean" if issues == 0 else "ISSUES DETECTED", "issues": issues}
+
+
+def _atheris_fuzz_status() -> dict[str, object]:
+    try:
+        import atheris  # noqa: F401
+    except ImportError:
+        return {
+            "status": "not run",
+            "reason": "atheris needs libFuzzer, which Apple Clang does not ship on macOS (runs in CI on Linux)",
+        }
+    results: dict[str, object] = {}
+    overall_clean = True
+    for target in ("fuzz_wav", "fuzz_iq"):
+        try:
+            proc = subprocess.run(  # noqa: S603
+                [sys.executable, str(ROOT / "tests" / f"{target}.py"), "-max_total_time=60"],
+                cwd=ROOT, capture_output=True, text=True, timeout=90,
+            )
+            crashed = proc.returncode != 0
+            results[target] = "crash detected" if crashed else "clean (60s)"
+            overall_clean = overall_clean and not crashed
+        except (OSError, subprocess.TimeoutExpired) as exc:
+            results[target] = f"not run: {exc}"
+            overall_clean = False
+    return {"status": "clean" if overall_clean else "ISSUES DETECTED", "targets": results}
+
+
 def main() -> int:
     print("Running full test suite (this takes about a minute)...")
     test_info = _run_tests()
@@ -77,6 +149,15 @@ def main() -> int:
     asan_info = _asan_ubsan_status()
     print(f"ASan/UBSan: {asan_info}")
 
+    clang_tidy_info = _clang_tidy_status()
+    print(f"clang-tidy: {clang_tidy_info}")
+
+    cppcheck_info = _cppcheck_status()
+    print(f"cppcheck: {cppcheck_info}")
+
+    atheris_info = _atheris_fuzz_status()
+    print(f"atheris fuzz (60s x2 targets): {atheris_info}")
+
     info = {
         "tests_passed": test_info["passed"],
         "tests_failed": test_info["failed"],
@@ -84,6 +165,9 @@ def main() -> int:
         "tests_exit_code": test_info["exit_code"],
         "native_cpp_kernels_present": native_present,
         "asan_ubsan": asan_info,
+        "clang_tidy": clang_tidy_info,
+        "cppcheck": cppcheck_info,
+        "atheris_fuzz": atheris_info,
     }
     OUT_PATH.parent.mkdir(exist_ok=True)
     OUT_PATH.write_text(json.dumps(info, indent=2), encoding="utf-8")

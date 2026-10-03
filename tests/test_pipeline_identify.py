@@ -113,9 +113,17 @@ def test_interleaver_under_a_conv_code_is_not_falsely_claimed_absent(tmp_path) -
     confident convolutional match on the raw received stream must NOT be
     read as proof the interleaver is absent -- conv coding sits between the
     channel and whatever outer code+interleaver might exist, so a conv match
-    says nothing about what's hidden behind it. Before the fix, this
-    produced a false "none present" claim for an interleaver that WAS
-    applied."""
+    alone says nothing about what's hidden behind it. Before the first fix,
+    this produced a false "none present" claim for an interleaver that WAS
+    applied.
+
+    Since then, pipeline_core gained a second fix that goes further than
+    just not-lying: once a convolutional code is confidently identified, it
+    is Viterbi-decoded, and the SAME interleaver+FEC search is tried one
+    level deeper on the decoded payload -- recovering the full chain instead
+    of stopping at "unidentified but not falsely absent". This signal's
+    interleaver and outer RS code are both now actually found.
+    """
     rng = np.random.default_rng(42)
     rs = RSCode(m=4, n=15, k=9)
     rs_symbols = np.concatenate([rs.encode(rng.integers(0, 16, rs.k)) for _ in range(60)])
@@ -136,5 +144,5 @@ def test_interleaver_under_a_conv_code_is_not_falsely_claimed_absent(tmp_path) -
     )
     paths = write_pair(sig, gt, tmp_path, "rs_interleave_conv_demo")
     result = run_full_pipeline(str(paths["wav"]), modulation_override="qpsk")
-    assert result.fec_label == "convolutional (rate1/2_K7)"  # the inner code IS correctly found
-    assert result.interleaver_label != "none present"  # but must NOT be falsely claimed absent
+    assert result.fec_label == "convolutional (rate1/2_K7) + reed-solomon (n=15, k=9, m=4)"
+    assert result.interleaver_label == "block (period=60)"

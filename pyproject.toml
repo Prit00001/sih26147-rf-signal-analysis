@@ -78,3 +78,9 @@ ignore_missing_imports = true
 
 [tool.bandit]
 targets = ["src"]
+# B608 (possible SQL injection): this project has no SQL anywhere (confirmed
+# by grep -- no sqlite3/psycopg/sqlalchemy import, no SELECT/INSERT/UPDATE/
+# DELETE statement). The only thing it can ever flag here is webui/server.py's
+# large HTML-template f-string, a confirmed false positive on its SQL-keyword
+# heuristic, found while verifying the CI pipeline runs clean end to end.
+skips = ["B608"]

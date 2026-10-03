@@ -64,7 +64,10 @@ def test_hero_and_stepper_present_with_real_timings(running_server: int) -> None
 
     stepper = data["stepper"]
     names = [s["name"] for s in stepper]
-    assert names == ["Ingest", "Preprocess", "Estimate", "Classify", "Demod", "De-interleave", "FEC", "Correlate"]
+    assert names == [
+        "Ingest", "Preprocess", "Estimate", "Classify", "Demod", "Resolve rotation", "De-interleave", "FEC",
+        "Correlate",
+    ]
     for step in stepper:
         assert step["status"] in ("done", "override", "fallback to override", "not present")
         assert step["time_ms"] >= 0

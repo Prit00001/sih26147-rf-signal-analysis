@@ -15,6 +15,8 @@ jobs:
       - run: uv pip install --python .venv/bin/python -e ".[train]"  # PyTorch, for classifier tests/training
       - name: Install Qt runtime deps for headless GUI tests (Linux)
         run: sudo apt-get update && sudo apt-get install -y libegl1 libgl1 libxkbcommon0 libxcb-cursor0
+      - name: Install clang-tidy and cppcheck (Linux only -- see README's "Known local-environment gaps" for macOS)
+        run: sudo apt-get install -y clang-tidy cppcheck
 
       - name: Build native extension
         run: |
@@ -22,6 +24,12 @@ jobs:
           cmake -S native -B native/build -G Ninja -DCMAKE_BUILD_TYPE=Release -Dpybind11_DIR="$PYBIND11_DIR"
           cmake --build native/build -j
           cp native/build/_native*.so src/sigscope/
+
+      - name: Static analysis (clang-tidy)
+        run: clang-tidy -p native/build native/src/*.cpp
+
+      - name: Static analysis (cppcheck)
+        run: cppcheck --enable=warning,style --inline-suppr --error-exitcode=1 native/src
 
       - name: Build native extension with ASan/UBSan
         run: |
@@ -46,7 +54,7 @@ jobs:
         run: .venv/bin/mypy src/sigscope
 
       - name: Security (bandit)
-        run: .venv/bin/bandit -r src/sigscope
+        run: .venv/bin/bandit -c pyproject.toml -r src/sigscope
 
       - name: Security (semgrep)
         run: .venv/bin/semgrep --config auto --error src/sigscope
@@ -64,3 +72,11 @@ jobs:
 
       - name: Fuzz .IQ parser (60s)
         run: timeout 60 .venv/bin/python tests/fuzz_iq.py -max_total_time=60 || true
+
+      - name: Write build info (real test/coverage/ASan/clang-tidy/cppcheck/atheris results for the dashboard)
+        run: .venv/bin/python scripts/write_build_info.py
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: build-info
+          path: reports/build_info.json
