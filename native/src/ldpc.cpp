@@ -66,6 +66,10 @@ LdpcDecodeResult ldpc_decode_min_sum(const std::vector<double>& llrs, const std:
     // extrinsic message sent back out to each connected check.
     for (size_t v = 0; v < static_cast<size_t>(num_bits); ++v) {
       double total = llrs[v];
+      // cppcheck-suppress useStlAlgorithm
+      // A raw loop reads more clearly here than std::accumulate with a
+      // capturing lambda for a one-line running sum; not a correctness
+      // concern, cppcheck's style suggestion overruled deliberately.
       for (size_t e : var_edges[v]) total += check_to_var[e];
       hard_bits[v] = (total < 0.0) ? uint8_t{1} : uint8_t{0};
       for (size_t e : var_edges[v]) {
@@ -77,6 +81,9 @@ LdpcDecodeResult ldpc_decode_min_sum(const std::vector<double>& llrs, const std:
     bool ok = true;
     for (size_t c = 0; c < static_cast<size_t>(num_checks) && ok; ++c) {
       int parity = 0;
+      // cppcheck-suppress useStlAlgorithm
+      // XOR-reduction, not a sum -- std::accumulate would need the same
+      // capturing-lambda indirection with none of the clarity benefit.
       for (size_t e : check_edges[c]) parity ^= hard_bits[static_cast<size_t>(h_cols[e])];
       if (parity != 0) ok = false;
     }
