@@ -62,6 +62,9 @@ jobs:
       - name: Dependency audit (pip-audit)
         run: .venv/bin/pip-audit
 
+      - name: TEMP debug Linux demod
+        run: .venv/bin/python scripts/_debug_linux_demod.py
+
       - name: Tests + coverage (>= 80% on core modules)
         env:
           QT_QPA_PLATFORM: offscreen
