@@ -89,9 +89,23 @@ def _clang_tidy_status() -> dict[str, object]:
             "status": "not run",
             "reason": "no compile_commands.json -- build native/build first (CMAKE_EXPORT_COMPILE_COMMANDS=ON)",
         }
+    extra_args = []
+    xcrun = shutil.which("xcrun")
+    if xcrun is not None:
+        # macOS only: a Homebrew-built clang-tidy does not share Apple
+        # Clang's default system-header search paths, even when parsing a
+        # compile_commands.json that Apple Clang itself produced -- MEASURED
+        # (not hypothetical): without this, every file fails with "'cstdint'
+        # file not found" before a single check even runs. Not needed (and
+        # xcrun does not exist) on the Linux CI this project also runs on.
+        sdk_path = subprocess.run(  # noqa: S603
+            [xcrun, "--sdk", "macosx", "--show-sdk-path"], capture_output=True, text=True, timeout=10
+        ).stdout.strip()
+        if sdk_path:
+            extra_args = [f"--extra-arg=-isysroot{sdk_path}"]
     try:
         proc = subprocess.run(  # noqa: S603 -- fixed args, not user input
-            [binary, "-p", str(COMPILE_DB), *[str(f) for f in NATIVE_SRC]],
+            [binary, "-p", str(COMPILE_DB), *extra_args, *[str(f) for f in NATIVE_SRC]],
             capture_output=True, text=True, timeout=300,
         )
     except OSError as exc:
@@ -99,6 +113,12 @@ def _clang_tidy_status() -> dict[str, object]:
     out = proc.stdout + proc.stderr
     warnings = len(re.findall(r": warning:", out))
     errors = len(re.findall(r": error:", out))
+    if proc.returncode != 0 and warnings == 0 and errors == 0:
+        # A real, if narrow, honesty bug this caught: clang-tidy can fail
+        # for reasons that don't match either regex (e.g. "Error: no checks
+        # enabled" has no colon before "error") -- without this check that
+        # silently reported "clean" despite nothing having actually run.
+        return {"status": "not run", "reason": f"clang-tidy exited {proc.returncode}: {out[-300:].strip()}"}
     status = "clean" if (warnings == 0 and errors == 0) else "ISSUES DETECTED"
     return {"status": status, "warnings": warnings, "errors": errors}
 

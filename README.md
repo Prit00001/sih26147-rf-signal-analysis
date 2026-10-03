@@ -46,11 +46,18 @@ python tests/fuzz_iq.py -max_total_time=60
 
 ## Known local-environment gaps (not code defects)
 
-- `clang-tidy` / `cppcheck` are not installed on this machine; they run in CI
-  (Linux) per SR-07. Install locally with `brew install llvm cppcheck` if you
-  want to run them here too.
-- `atheris` cannot build against Apple Clang on macOS (see above); it runs in
-  CI on Linux.
+- `clang-tidy` / `cppcheck` are not installed by default on macOS; install
+  with `brew install llvm cppcheck` to run them locally too (confirmed
+  working: both report clean on `native/src` once installed -- see
+  `scripts/write_build_info.py`, which also needs an explicit `.clang-tidy`
+  (checked into this repo) and an `-isysroot` pointed at the macOS SDK, since
+  a Homebrew-built clang-tidy does not share Apple Clang's default system-
+  header search paths even when parsing a compile_commands.json Apple Clang
+  itself produced -- MEASURED, not hypothetical: without both of those this
+  fails outright, not just with warnings).
+- `atheris` cannot build against Apple Clang on macOS (it needs libFuzzer,
+  which Apple's Clang does not ship) -- this one is a genuine platform
+  constraint, not a missing install step; it runs in CI on Linux.
 
 ## Phase 2: parameter estimation + modulation classification
 

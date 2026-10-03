@@ -1,0 +1,10 @@
+# Explicit check set, not relying on clang-tidy's own built-in default --
+# MEASURED, not hypothetical: clang-tidy 23.1.2 (Homebrew) errors "no checks
+# enabled" with no .clang-tidy present, while CI's apt-installed clang-tidy
+# silently used the classic implicit default (clang-diagnostic-*,
+# clang-analyzer-*) and passed. Pinning the set explicitly here keeps both
+# environments doing the same check, instead of silently depending on
+# whichever default a given clang-tidy version happens to ship.
+Checks: 'clang-diagnostic-*,clang-analyzer-*'
+WarningsAsErrors: ''
+HeaderFilterRegex: 'native/src/.*'

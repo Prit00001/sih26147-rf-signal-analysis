@@ -6,8 +6,8 @@ namespace sigscope {
 
 struct LdpcDecodeResult {
   std::vector<uint8_t> bits;
-  bool converged;
-  int iterations;
+  bool converged = false;
+  int iterations = 0;
 };
 
 // Min-sum belief-propagation LDPC decoder over a sparse parity-check matrix H,
