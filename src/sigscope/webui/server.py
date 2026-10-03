@@ -713,15 +713,11 @@ def _render_page() -> bytes:
     --good: #2fc383; --mid: #e3b341; --bad: #f2574c;
     --mono: ui-monospace, 'SFMono-Regular', Menlo, Consolas, monospace;
     --sans: -apple-system, BlinkMacSystemFont, 'Inter', 'Segoe UI', sans-serif;
-    --radius: 10px; --radius-lg: 16px;
-    --shadow-sm: 0 1px 2px rgba(0,0,0,0.4);
-    --shadow-lg: 0 1px 1px rgba(0,0,0,0.3), 0 16px 40px -12px rgba(0,0,0,0.6);
+    --radius: 10px; --radius-lg: 14px;
   }}
   * {{ box-sizing: border-box; }}
   body {{
-    background:
-      radial-gradient(900px 500px at 15% -10%, rgba(110,106,245,0.10), transparent 60%),
-      var(--bg);
+    background: var(--bg);
     color: var(--text); margin: 0; font-family: var(--sans);
     -webkit-font-smoothing: antialiased; font-feature-settings: "tnum" 1;
   }}
@@ -730,16 +726,7 @@ def _render_page() -> bytes:
     padding: 11px 24px; border-bottom: 1px solid var(--border);
   }}
   .brand {{ display: flex; align-items: center; gap: 10px; }}
-  .mark {{
-    width: 26px; height: 26px; border-radius: 8px; flex: none;
-    background: linear-gradient(135deg, var(--accent), #a78bfa);
-    box-shadow: 0 0 0 1px rgba(255,255,255,0.08) inset, 0 4px 14px -4px rgba(110,106,245,0.6);
-    position: relative;
-  }}
-  .mark::after {{
-    content: ""; position: absolute; inset: 0; margin: auto; width: 10px; height: 2px;
-    background: #fff; border-radius: 2px; box-shadow: 0 -4px 0 rgba(255,255,255,0.55), 0 4px 0 rgba(255,255,255,0.55);
-  }}
+  .mark {{ width: 22px; height: 22px; border-radius: 6px; flex: none; background: var(--accent); }}
   .brand h1 {{ font-size: 15px; margin: 0; color: #fff; font-weight: 650; letter-spacing: -0.2px; }}
   .brand .tagline {{ font-size: 12px; color: var(--text-dim); margin-left: 4px; }}
   .badge {{
@@ -749,7 +736,7 @@ def _render_page() -> bytes:
   .layout {{ display: flex; align-items: flex-start; gap: 18px; padding: 16px 20px; max-width: 1280px; margin: 0 auto; }}
   .sidebar {{
     width: 270px; flex: none; background: var(--surface); border: 1px solid var(--border);
-    border-radius: var(--radius-lg); padding: 16px; box-shadow: var(--shadow-sm); position: sticky; top: 16px;
+    border-radius: var(--radius-lg); padding: 16px; position: sticky; top: 16px;
   }}
   .sidebar h2 {{ font-size: 11px; font-weight: 650; text-transform: uppercase; letter-spacing: 0.6px;
     color: var(--text-faint); margin: 0 0 10px; }}
@@ -768,12 +755,10 @@ def _render_page() -> bytes:
     width: 100%; margin-top: 20px; padding: 10px 16px;
     background: var(--accent); color: #fff; border: none; border-radius: 8px; cursor: pointer;
     font-size: 13px; font-weight: 600; font-family: var(--sans);
-    box-shadow: 0 1px 2px rgba(0,0,0,0.3), 0 6px 16px -6px rgba(110,106,245,0.7);
-    transition: background .12s, transform .12s;
+    transition: background .12s;
   }}
-  button:hover {{ background: var(--accent-hover); transform: translateY(-1px); }}
-  button:active {{ transform: translateY(0); }}
-  button:disabled {{ background: var(--raised); color: var(--text-faint); box-shadow: none; cursor: not-allowed; transform: none; }}
+  button:hover {{ background: var(--accent-hover); }}
+  button:disabled {{ background: var(--raised); color: var(--text-faint); cursor: not-allowed; }}
   #dropzone {{
     height: 84px; border: 1.5px dashed var(--border-strong); border-radius: var(--radius); display: flex;
     align-items: center; justify-content: center; color: var(--text-dim); cursor: pointer;
@@ -812,7 +797,7 @@ def _render_page() -> bytes:
   .tab.active {{ color: #fff; border-bottom-color: var(--accent); }}
   .panel {{ display: none; animation: rise .2s ease; }}
   .panel.active {{ display: block; }}
-  .card {{ background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius-lg); padding: 13px 16px; box-shadow: var(--shadow-sm); }}
+  .card {{ background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius-lg); padding: 13px 16px; }}
   table {{ border-collapse: collapse; width: 100%; }}
   td, th {{ border-bottom: 1px solid var(--border); padding: 7px 10px; font-size: 12px; text-align: left; }}
   tr:last-child td {{ border-bottom: none; }}
@@ -843,31 +828,28 @@ def _render_page() -> bytes:
   }}
 
   .hero {{
-    background: linear-gradient(165deg, var(--surface), var(--surface-2));
-    border: 1px solid var(--border); border-radius: var(--radius-lg);
-    padding: 16px 18px; margin-bottom: 10px; box-shadow: var(--shadow-lg);
+    background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius-lg);
+    padding: 16px 18px; margin-bottom: 10px;
   }}
-  .hero-top {{ display: flex; align-items: flex-start; justify-content: space-between; gap: 16px; flex-wrap: wrap; margin-bottom: 14px; }}
+  .hero-top {{ display: flex; align-items: flex-start; justify-content: space-between; gap: 16px; flex-wrap: wrap; margin-bottom: 16px; }}
   .hero .hero-line {{ font-family: var(--mono); font-size: 13.5px; color: var(--text-dim); }}
   .hero .hero-line b {{ color: var(--accent); font-weight: 700; }}
   .hero .hero-time {{ font-size: 11px; color: var(--text-faint); margin-top: 2px; }}
 
-  .hero-stats {{ display: flex; gap: 10px; flex-wrap: wrap; }}
+  .hero-stats {{ display: flex; flex-wrap: wrap; }}
   .stat-tile {{
-    flex: 1; min-width: 128px; background: rgba(0,0,0,0.18); border: 1px solid var(--border);
-    border-radius: var(--radius); padding: 10px 14px;
+    flex: 1; min-width: 128px; padding: 0 18px; border-left: 1px solid var(--border);
   }}
+  .stat-tile:first-child {{ padding-left: 0; border-left: none; }}
   .stat-tile .stat-label {{
     font-size: 9.5px; font-weight: 700; letter-spacing: 0.6px; text-transform: uppercase; color: var(--text-faint);
   }}
   .stat-tile .stat-value {{
-    font-size: 22px; font-weight: 800; color: var(--text); font-family: var(--mono); margin-top: 3px;
+    font-size: 22px; font-weight: 700; color: var(--text); font-family: var(--mono); margin-top: 3px;
     line-height: 1.15; word-break: break-word;
   }}
   .stat-tile .stat-sub {{ font-size: 10.5px; color: var(--text-dim); margin-top: 2px; }}
-  .stat-tile.gt-good {{ border-color: rgba(47,195,131,0.45); background: rgba(47,195,131,0.08); }}
   .stat-tile.gt-good .stat-value {{ color: var(--good); }}
-  .stat-tile.gt-partial {{ border-color: rgba(227,179,65,0.45); background: rgba(227,179,65,0.08); }}
   .stat-tile.gt-partial .stat-value {{ color: var(--mid); }}
 
   .stepper {{ display: flex; gap: 5px; margin-bottom: 10px; flex-wrap: wrap; }}
