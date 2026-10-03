@@ -33,6 +33,7 @@ dev = [
 # lean and avoids pulling PyTorch into an analyst's air-gapped install.
 train = [
     "torch>=2.2",
+    "onnxscript",  # torch.onnx.export's dynamo-based exporter needs this on recent torch; MEASURED missing in CI
 ]
 
 [project.scripts]

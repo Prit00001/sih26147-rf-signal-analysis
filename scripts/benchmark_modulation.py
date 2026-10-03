@@ -25,8 +25,19 @@ from sigscope.synth.generator import ALL_MODULATIONS, generate_signal
 
 SNR_GRID_DB = [-5.0, 0.0, 5.0, 10.0, 15.0, 20.0, 25.0]
 
+# P6: the same fixed, documented impaired-channel preset benchmark_ber.py
+# uses -- see that module for why these specific values (one representative
+# set, not a full sweep).
+IMPAIRED_CHANNEL_KWARGS: dict[str, object] = {
+    "multipath_taps": ((3, -6.0, 40.0),),
+    "fading_rate_hz": 5.0,
+    "timing_drift_ppm": 20.0,
+}
 
-def run_benchmark(manifest_path: Path, *, trials_per_cell: int = 30, seed: int = 999) -> list[dict[str, object]]:
+
+def run_benchmark(
+    manifest_path: Path, *, trials_per_cell: int = 30, seed: int = 999, impaired: bool = False
+) -> list[dict[str, object]]:
     bundle = load_classifier(manifest_path)
     rng = np.random.default_rng(seed)
     rows: list[dict[str, object]] = []
@@ -45,6 +56,7 @@ def run_benchmark(manifest_path: Path, *, trials_per_cell: int = 30, seed: int =
                     iq_imbalance_gain_db=float(rng.uniform(-0.5, 0.5)),
                     iq_imbalance_phase_deg=float(rng.uniform(-3, 3)),
                     seed=int(rng.integers(0, 2**31 - 1)),
+                    **(IMPAIRED_CHANNEL_KWARGS if impaired else {}),
                 )
                 label, _confidence, _scores = ensemble_classify(
                     sig.samples, bundle, sample_rate=sig.sample_rate, symbol_rate_hz=100_000.0
@@ -85,15 +97,19 @@ if __name__ == "__main__":
     parser.add_argument("--model", default="models/modulation_cnn.manifest.json")
     parser.add_argument("--out", default="reports")
     parser.add_argument("--trials-per-cell", type=int, default=30)
+    parser.add_argument(
+        "--impaired", action="store_true", help="apply the P6 multipath+fading+timing-drift channel preset"
+    )
     args = parser.parse_args()
 
     out_dir = Path(args.out)
     out_dir.mkdir(parents=True, exist_ok=True)
-    rows = run_benchmark(Path(args.model), trials_per_cell=args.trials_per_cell)
-    write_csv(rows, out_dir / "modulation_accuracy_vs_snr.csv")
-    write_plot(rows, out_dir / "modulation_accuracy_vs_snr.png")
+    suffix = "_impaired" if args.impaired else ""
+    rows = run_benchmark(Path(args.model), trials_per_cell=args.trials_per_cell, impaired=args.impaired)
+    write_csv(rows, out_dir / f"modulation_accuracy_vs_snr{suffix}.csv")
+    write_plot(rows, out_dir / f"modulation_accuracy_vs_snr{suffix}.png")
 
     overall = sum(r["accuracy"] for r in rows) / len(rows)  # type: ignore[misc]
     print(f"overall mean accuracy across all classes/SNRs: {overall:.3f}")
-    print(f"wrote {out_dir / 'modulation_accuracy_vs_snr.csv'}")
-    print(f"wrote {out_dir / 'modulation_accuracy_vs_snr.png'}")
+    print(f"wrote {out_dir / f'modulation_accuracy_vs_snr{suffix}.csv'}")
+    print(f"wrote {out_dir / f'modulation_accuracy_vs_snr{suffix}.png'}")

@@ -80,12 +80,18 @@ def _asan_ubsan_status() -> dict[str, object]:
 def _clang_tidy_status() -> dict[str, object]:
     binary = shutil.which("clang-tidy")
     if binary is None:
-        return {"status": "not run", "reason": "clang-tidy not installed (runs in CI on Linux; brew install llvm for local macOS)"}
+        return {
+            "status": "not run",
+            "reason": "clang-tidy not installed (runs in CI on Linux; brew install llvm for local macOS)",
+        }
     if not (COMPILE_DB / "compile_commands.json").is_file():
-        return {"status": "not run", "reason": "no compile_commands.json -- build native/build first (CMAKE_EXPORT_COMPILE_COMMANDS=ON)"}
+        return {
+            "status": "not run",
+            "reason": "no compile_commands.json -- build native/build first (CMAKE_EXPORT_COMPILE_COMMANDS=ON)",
+        }
     try:
-        proc = subprocess.run(
-            [binary, "-p", str(COMPILE_DB), *[str(f) for f in NATIVE_SRC]],  # noqa: S603
+        proc = subprocess.run(  # noqa: S603 -- fixed args, not user input
+            [binary, "-p", str(COMPILE_DB), *[str(f) for f in NATIVE_SRC]],
             capture_output=True, text=True, timeout=300,
         )
     except OSError as exc:
@@ -100,10 +106,13 @@ def _clang_tidy_status() -> dict[str, object]:
 def _cppcheck_status() -> dict[str, object]:
     binary = shutil.which("cppcheck")
     if binary is None:
-        return {"status": "not run", "reason": "cppcheck not installed (runs in CI on Linux; brew install cppcheck for local macOS)"}
+        return {
+            "status": "not run",
+            "reason": "cppcheck not installed (runs in CI on Linux; brew install cppcheck for local macOS)",
+        }
     try:
-        proc = subprocess.run(
-            [binary, "--enable=warning,style", "--inline-suppr", "--quiet", str(ROOT / "native" / "src")],  # noqa: S603
+        proc = subprocess.run(  # noqa: S603 -- fixed args, not user input
+            [binary, "--enable=warning,style", "--inline-suppr", "--quiet", str(ROOT / "native" / "src")],
             capture_output=True, text=True, timeout=300,
         )
     except OSError as exc:

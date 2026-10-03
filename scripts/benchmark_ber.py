@@ -31,10 +31,29 @@ LINEAR_MODS = ["bpsk", "qpsk", "8psk", "16qam", "64qam"]
 FSK_MODS = ["2fsk", "4fsk", "8fsk"]
 SNR_GRID_DB = [0.0, 5.0, 10.0, 15.0, 20.0, 25.0]
 
+# P6: one fixed, documented impaired-channel preset (not a CLI-tunable knob
+# per impairment -- this benchmark's job is "does the chain still work under
+# a representative set of real-world channel impairments", not a full
+# multi-dimensional sweep). A 2-tap multipath (one -6dB echo 3 samples
+# behind the direct path), slow flat Rayleigh-like fading, and a receiver
+# clock drift this project's demod chain previously had nothing to track
+# (see sync.py's Gardner recovery docstring).
+IMPAIRED_CHANNEL_KWARGS: dict[str, object] = {
+    "multipath_taps": ((3, -6.0, 40.0),),
+    "fading_rate_hz": 5.0,
+    "timing_drift_ppm": 20.0,
+}
 
-def run_linear(mod: str, snr_db: float, seed: int) -> dict[str, float]:
+
+def run_linear(mod: str, snr_db: float, seed: int, *, impaired: bool = False) -> dict[str, float]:
     sig, gt = generate_signal(
-        mod, num_symbols=4000, sample_rate=1_000_000.0, symbol_rate=100_000.0, snr_db=snr_db, seed=seed
+        mod,
+        num_symbols=4000,
+        sample_rate=1_000_000.0,
+        symbol_rate=100_000.0,
+        snr_db=snr_db,
+        seed=seed,
+        **(IMPAIRED_CHANNEL_KWARGS if impaired else {}),
     )
     result = demodulate_psk_qam(sig.samples, mod, sig.sample_rate, gt.symbol_rate)
     tx_symbols = tx_symbol_indices(gt.bits, mod)
@@ -43,9 +62,15 @@ def run_linear(mod: str, snr_db: float, seed: int) -> dict[str, float]:
     return {"ser": ser, "measured_snr_db": measured_snr, "theory_ber": theoretical_ber(mod, measured_snr)}
 
 
-def run_fsk(mod: str, snr_db: float, seed: int) -> dict[str, float]:
+def run_fsk(mod: str, snr_db: float, seed: int, *, impaired: bool = False) -> dict[str, float]:
     sig, gt = generate_signal(
-        mod, num_symbols=4000, sample_rate=1_000_000.0, symbol_rate=100_000.0, snr_db=snr_db, seed=seed
+        mod,
+        num_symbols=4000,
+        sample_rate=1_000_000.0,
+        symbol_rate=100_000.0,
+        snr_db=snr_db,
+        seed=seed,
+        **(IMPAIRED_CHANNEL_KWARGS if impaired else {}),
     )
     result = demodulate_fsk(sig.samples, mod, sig.sample_rate, gt.symbol_rate)
     bps = FSK_BITS_PER_SYMBOL[mod]
@@ -60,15 +85,15 @@ def run_fsk(mod: str, snr_db: float, seed: int) -> dict[str, float]:
     return {"ser": ser, "measured_snr_db": snr_db, "theory_ber": float("nan")}
 
 
-def run_benchmark(seed: int = 42) -> list[dict[str, object]]:
+def run_benchmark(seed: int = 42, *, impaired: bool = False) -> list[dict[str, object]]:
     rows: list[dict[str, object]] = []
     for mod in LINEAR_MODS:
         for snr_db in SNR_GRID_DB:
-            r = run_linear(mod, snr_db, seed)
+            r = run_linear(mod, snr_db, seed, impaired=impaired)
             rows.append({"modulation": mod, "nominal_snr_db": snr_db, **r})
     for mod in FSK_MODS:
         for snr_db in SNR_GRID_DB:
-            r = run_fsk(mod, snr_db, seed)
+            r = run_fsk(mod, snr_db, seed, impaired=impaired)
             rows.append({"modulation": mod, "nominal_snr_db": snr_db, **r})
     return rows
 
@@ -100,11 +125,15 @@ def write_plot(rows: list[dict[str, object]], path: Path) -> None:
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--out", default="reports")
+    parser.add_argument(
+        "--impaired", action="store_true", help="apply the P6 multipath+fading+timing-drift channel preset"
+    )
     args = parser.parse_args()
     out_dir = Path(args.out)
     out_dir.mkdir(parents=True, exist_ok=True)
-    rows = run_benchmark()
-    write_csv(rows, out_dir / "demod_ber_vs_snr.csv")
-    write_plot(rows, out_dir / "demod_ber_vs_snr.png")
-    print(f"wrote {out_dir / 'demod_ber_vs_snr.csv'}")
-    print(f"wrote {out_dir / 'demod_ber_vs_snr.png'}")
+    suffix = "_impaired" if args.impaired else ""
+    rows = run_benchmark(impaired=args.impaired)
+    write_csv(rows, out_dir / f"demod_ber_vs_snr{suffix}.csv")
+    write_plot(rows, out_dir / f"demod_ber_vs_snr{suffix}.png")
+    print(f"wrote {out_dir / f'demod_ber_vs_snr{suffix}.csv'}")
+    print(f"wrote {out_dir / f'demod_ber_vs_snr{suffix}.png'}")

@@ -168,6 +168,65 @@ def _modulate_noise(n: int, rng: np.random.Generator) -> npt.NDArray[np.complex6
     return cast(npt.NDArray[np.complex64], result.astype(np.complex64))
 
 
+def _apply_multipath(
+    x: npt.NDArray[np.complex128], taps: tuple[tuple[int, float, float], ...]
+) -> npt.NDArray[np.complex128]:
+    """Sums delayed, attenuated, phase-rotated copies of ``x`` onto itself --
+    a simple tapped-delay-line multipath model (each tap: delay in samples,
+    relative gain in dB, phase in degrees). The direct (zero-delay, 0 dB, 0
+    deg) path is always implicitly present; ``taps`` are the EXTRA echoes.
+    ponytail: a fixed-delay tapped-delay-line, not a continuous-Doppler or
+    frequency-selective-fading model -- fine for exercising "does the demod
+    chain still work with echoes", not a claim of matching any specific real
+    propagation environment. Upgrade path: a proper 3GPP/ITU channel model
+    (e.g. Jakes' Doppler spectrum per tap) if that distinction matters.
+    """
+    combined = x.copy()
+    n = len(x)
+    for delay, gain_db, phase_deg in taps:
+        gain = (10 ** (gain_db / 20.0)) * np.exp(1j * np.deg2rad(phase_deg))
+        delayed = np.zeros(n, dtype=np.complex128)
+        if delay > 0:
+            delayed[delay:] = x[: n - delay]
+        elif delay < 0:
+            delayed[: n + delay] = x[-delay:]
+        else:
+            delayed = x
+        combined = combined + gain * delayed
+    return combined
+
+
+def _apply_fading(
+    x: npt.NDArray[np.complex128], rate_hz: float, sample_rate: float, rng: np.random.Generator
+) -> npt.NDArray[np.complex128]:
+    """Flat Rayleigh-like fading: an AR(1)-filtered complex Gaussian process
+    (a one-pole low-pass on complex white noise), normalized to unit average
+    power so it changes the SIGNAL's amplitude/phase over time without
+    shifting the overall SNR definition elsewhere in this pipeline.
+
+    ponytail: this is a standard, simple way to get a slowly-varying complex
+    channel gain with roughly the right time-correlation (set by
+    ``rate_hz``), not the full Jakes/Clarke model's exact Doppler PSD shape
+    (U-shaped, not AR(1)'s one-pole low-pass) -- a real cellular-channel
+    simulator would use that instead. Upgrade path: swap in Jakes' model if
+    the precise Doppler spectrum shape matters for a given test.
+    """
+    n = len(x)
+    if rate_hz <= 0 or n == 0:
+        return x
+    alpha = float(np.exp(-2 * np.pi * rate_hz / sample_rate))
+    noise = rng.standard_normal(n) + 1j * rng.standard_normal(n)
+    fade = np.zeros(n, dtype=np.complex128)
+    fade[0] = noise[0]
+    one_minus_alpha_sq = np.sqrt(max(1.0 - alpha**2, 0.0))
+    for i in range(1, n):
+        fade[i] = alpha * fade[i - 1] + one_minus_alpha_sq * noise[i]
+    fade_power = np.mean(np.abs(fade) ** 2)
+    if fade_power > 0:
+        fade = fade / np.sqrt(fade_power)
+    return x * fade
+
+
 def _apply_channel(
     iq: npt.NDArray[np.complex64],
     *,
@@ -175,20 +234,36 @@ def _apply_channel(
     snr_db: float,
     cfo_hz: float,
     timing_offset_frac: float,
+    timing_drift_ppm: float,
+    multipath_taps: tuple[tuple[int, float, float], ...],
+    fading_rate_hz: float,
     iq_imbalance_gain_db: float,
     iq_imbalance_phase_deg: float,
     rng: np.random.Generator,
 ) -> npt.NDArray[np.complex64]:
     x = iq.astype(np.complex128)
 
-    if abs(timing_offset_frac) > 1e-9:
+    # Timing drift is a linearly-growing addition to the (otherwise fixed)
+    # sub-sample timing offset -- a real receiver clock that is off by a
+    # constant PPM accumulates offset proportionally to elapsed samples, not
+    # a one-shot shift. See demod/sync.py's Gardner recovery docstring: this
+    # project's channel model previously had no drift to track, only a
+    # fixed offset to find -- this is what finally exercises that case.
+    if abs(timing_offset_frac) > 1e-9 or abs(timing_drift_ppm) > 1e-9:
         n = np.arange(len(x))
-        n_src = n - timing_offset_frac
-        x = (np.interp(n_src, n, x.real, left=0.0, right=0.0) + 1j * np.interp(n_src, n, x.imag, left=0.0, right=0.0))
+        drift_frac = timing_drift_ppm * 1e-6 * n
+        n_src = n - timing_offset_frac - drift_frac
+        x = np.interp(n_src, n, x.real, left=0.0, right=0.0) + 1j * np.interp(n_src, n, x.imag, left=0.0, right=0.0)
+
+    if multipath_taps:
+        x = _apply_multipath(x, multipath_taps)
 
     if cfo_hz != 0.0:
         n = np.arange(len(x))
         x = x * np.exp(1j * 2 * np.pi * cfo_hz * n / sample_rate)
+
+    if fading_rate_hz > 0:
+        x = _apply_fading(x, fading_rate_hz, sample_rate, rng)
 
     if iq_imbalance_gain_db != 0.0 or iq_imbalance_phase_deg != 0.0:
         gain = 10 ** (iq_imbalance_gain_db / 20.0)
@@ -215,6 +290,9 @@ class GroundTruth:
     snr_db: float
     cfo_hz: float
     timing_offset_frac: float
+    timing_drift_ppm: float
+    multipath_taps: tuple[tuple[int, float, float], ...]
+    fading_rate_hz: float
     iq_imbalance_gain_db: float
     iq_imbalance_phase_deg: float
     rolloff: float
@@ -231,6 +309,9 @@ def generate_signal(
     snr_db: float = 15.0,
     cfo_hz: float = 0.0,
     timing_offset_frac: float = 0.0,
+    timing_drift_ppm: float = 0.0,
+    multipath_taps: tuple[tuple[int, float, float], ...] = (),
+    fading_rate_hz: float = 0.0,
     iq_imbalance_gain_db: float = 0.0,
     iq_imbalance_phase_deg: float = 0.0,
     rolloff: float = 0.35,
@@ -290,6 +371,9 @@ def generate_signal(
         snr_db=snr_db,
         cfo_hz=cfo_hz,
         timing_offset_frac=timing_offset_frac,
+        timing_drift_ppm=timing_drift_ppm,
+        multipath_taps=multipath_taps,
+        fading_rate_hz=fading_rate_hz,
         iq_imbalance_gain_db=iq_imbalance_gain_db,
         iq_imbalance_phase_deg=iq_imbalance_phase_deg,
         rng=rng,
@@ -313,6 +397,9 @@ def generate_signal(
         snr_db=snr_db,
         cfo_hz=cfo_hz,
         timing_offset_frac=timing_offset_frac,
+        timing_drift_ppm=timing_drift_ppm,
+        multipath_taps=multipath_taps,
+        fading_rate_hz=fading_rate_hz,
         iq_imbalance_gain_db=iq_imbalance_gain_db,
         iq_imbalance_phase_deg=iq_imbalance_phase_deg,
         rolloff=rolloff,
